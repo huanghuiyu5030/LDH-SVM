@@ -47,7 +47,7 @@ feature_order = ["Age", "BMI", "Lowback_vas", "Leg_vas", "Duration",
                  "Herniation_sagittal", "Modic_grade", "Pfirrmann_grade"]
 
 # ------------------------------
-# 2. Load resources with proper column names
+# 2. Load resources (using numpy arrays to avoid feature name issues)
 # ------------------------------
 def init_resources():
     if 'model' not in st.session_state:
@@ -57,18 +57,17 @@ def init_resources():
         with st.spinner("Loading feature scaler..."):
             st.session_state.scaler = joblib.load('scaler.pkl')
     if 'background_df_scaled' not in st.session_state:
-        with st.spinner("Loading background data for SHAP..."):
+        with st.spinner("Preparing background data for SHAP..."):
             try:
                 bg_raw = pd.read_csv('background_sample.csv')
-                # Ensure column order
-                bg_raw = bg_raw[feature_order]
-                # Ensure column names match training (scaler may require exact names)
-                bg_raw.columns = feature_order
-                # Scale
-                bg_scaled = st.session_state.scaler.transform(bg_raw)
-                st.session_state.background_df_scaled = pd.DataFrame(bg_scaled, columns=feature_order)
+                bg_raw = bg_raw[feature_order]          # ensure correct order
+                # Convert to numpy array to avoid column name checking
+                bg_raw_array = bg_raw.values
+                bg_scaled = st.session_state.scaler.transform(bg_raw_array)
+                # Store scaled array as numpy, and also keep as DataFrame for SHAP (but will use array internally)
+                st.session_state.background_scaled_array = bg_scaled
             except FileNotFoundError:
-                st.warning("background_sample.csv not found. Using randomly generated background (SHAP may be inaccurate).")
+                st.warning("background_sample.csv not found. Using randomly generated background (SHAP may be less accurate).")
                 np.random.seed(42)
                 num_bg = 100
                 bg_data = []
@@ -79,14 +78,15 @@ def init_resources():
                     else:
                         vals = np.random.choice(list(info["mapping"].values()), num_bg)
                     bg_data.append(vals)
-                bg_raw = pd.DataFrame(np.array(bg_data).T, columns=feature_order)
-                bg_scaled = st.session_state.scaler.transform(bg_raw)
-                st.session_state.background_df_scaled = pd.DataFrame(bg_scaled, columns=feature_order)
+                bg_raw_array = np.array(bg_data).T
+                bg_scaled = st.session_state.scaler.transform(bg_raw_array)
+                st.session_state.background_scaled_array = bg_scaled
     if 'explainer' not in st.session_state:
-        with st.spinner("Initializing SHAP KernelExplainer..."):
+        with st.spinner("Initializing SHAP KernelExplainer (first run may be slow)..."):
+            # SHAP expects the background data as a matrix (numpy array)
             st.session_state.explainer = shap.KernelExplainer(
                 st.session_state.model.predict_proba,
-                st.session_state.background_df_scaled
+                st.session_state.background_scaled_array
             )
 
 init_resources()
@@ -95,7 +95,7 @@ scaler = st.session_state.scaler
 explainer = st.session_state.explainer
 
 # ------------------------------
-# 3. UI
+# 3. UI layout
 # ------------------------------
 st.title("🔮 Lumbar Disc Herniation: Prediction of Conservative Treatment Failure")
 st.markdown("Enter patient clinical and imaging features. The model predicts the probability of **conservative treatment failure** (i.e., need for surgery or persistent pain).")
@@ -125,12 +125,13 @@ with left_col:
 
 with right_col:
     if predict_button:
-        # Create DataFrame with correct column names
-        features_raw_df = pd.DataFrame([{feat: input_values[feat] for feat in feature_order}])
-        # Ensure columns are in order (already)
-        features_scaled = scaler.transform(features_raw_df)
+        # Create numpy array with correct order
+        features_raw = np.array([[input_values[feat] for feat in feature_order]], dtype=float)
+        # Scale using numpy array (no column names)
+        features_scaled = scaler.transform(features_raw)
         
         proba = model.predict_proba(features_scaled)[0]
+        # Assume classes: [success, failure]
         failure_prob = proba[1] * 100
         
         st.subheader("📊 Prediction Result")
@@ -141,13 +142,15 @@ with right_col:
         )
         
         with st.spinner("Computing feature contributions..."):
-            # Use DataFrame with scaled values and same column names
-            features_scaled_df = pd.DataFrame(features_scaled, columns=feature_order)
-            shap_values_all = explainer.shap_values(features_scaled_df)
+            # SHAP expects the sample as a matrix (numpy array)
+            shap_values_all = explainer.shap_values(features_scaled)
             if len(shap_values_all.shape) == 3:
                 shap_values_failure = shap_values_all[0, :, 1]
             else:
                 shap_values_failure = shap_values_all[0, :]
+            
+            # For plots, we need feature names; create a DataFrame with scaled values for visualization
+            scaled_df = pd.DataFrame(features_scaled, columns=feature_order)
             
             # Bar plot
             st.subheader("📌 Feature Contribution Magnitude")
@@ -157,12 +160,12 @@ with right_col:
             st.pyplot(fig)
             plt.close()
             
-            # Dot plot
+            # Dot plot (single sample)
             st.subheader("📌 Direction of Feature Contribution")
             fig, ax = plt.subplots(figsize=(8, 4))
             shap.summary_plot(
                 shap_values_failure.reshape(1, -1),
-                features_scaled_df,
+                scaled_df,
                 plot_type="dot",
                 show=False
             )
