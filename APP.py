@@ -8,7 +8,7 @@ import shap
 import matplotlib.pyplot as plt
 
 # ------------------------------
-# 1. Feature mappings (same as training)
+# 1. Feature mappings
 # ------------------------------
 categorical_mappings = {
     "Herniation_sagittal": {
@@ -47,7 +47,7 @@ feature_order = ["Age", "BMI", "Lowback_vas", "Leg_vas", "Duration",
                  "Herniation_sagittal", "Modic_grade", "Pfirrmann_grade"]
 
 # ------------------------------
-# 2. Load model, scaler, and background data (cached)
+# 2. Load resources with proper column names
 # ------------------------------
 def init_resources():
     if 'model' not in st.session_state:
@@ -60,8 +60,11 @@ def init_resources():
         with st.spinner("Loading background data for SHAP..."):
             try:
                 bg_raw = pd.read_csv('background_sample.csv')
+                # Ensure column order
                 bg_raw = bg_raw[feature_order]
-                # Scale background data using the same scaler
+                # Ensure column names match training (scaler may require exact names)
+                bg_raw.columns = feature_order
+                # Scale
                 bg_scaled = st.session_state.scaler.transform(bg_raw)
                 st.session_state.background_df_scaled = pd.DataFrame(bg_scaled, columns=feature_order)
             except FileNotFoundError:
@@ -80,7 +83,7 @@ def init_resources():
                 bg_scaled = st.session_state.scaler.transform(bg_raw)
                 st.session_state.background_df_scaled = pd.DataFrame(bg_scaled, columns=feature_order)
     if 'explainer' not in st.session_state:
-        with st.spinner("Initializing SHAP KernelExplainer (first run may be slow)..."):
+        with st.spinner("Initializing SHAP KernelExplainer..."):
             st.session_state.explainer = shap.KernelExplainer(
                 st.session_state.model.predict_proba,
                 st.session_state.background_df_scaled
@@ -92,7 +95,7 @@ scaler = st.session_state.scaler
 explainer = st.session_state.explainer
 
 # ------------------------------
-# 3. UI layout: left (input) and right (output)
+# 3. UI
 # ------------------------------
 st.title("🔮 Lumbar Disc Herniation: Prediction of Conservative Treatment Failure")
 st.markdown("Enter patient clinical and imaging features. The model predicts the probability of **conservative treatment failure** (i.e., need for surgery or persistent pain).")
@@ -122,13 +125,12 @@ with left_col:
 
 with right_col:
     if predict_button:
-        # Convert raw input to numpy array
-        features_raw = np.array([[input_values[feat] for feat in feature_order]])
-        # Apply the SAME scaling used during training (CRITICAL!)
-        features_scaled = scaler.transform(features_raw)
+        # Create DataFrame with correct column names
+        features_raw_df = pd.DataFrame([{feat: input_values[feat] for feat in feature_order}])
+        # Ensure columns are in order (already)
+        features_scaled = scaler.transform(features_raw_df)
         
         proba = model.predict_proba(features_scaled)[0]
-        # Assume model.classes_ = [0 (success), 1 (failure)]
         failure_prob = proba[1] * 100
         
         st.subheader("📊 Prediction Result")
@@ -139,8 +141,9 @@ with right_col:
         )
         
         with st.spinner("Computing feature contributions..."):
-            # SHAP explanation using scaled features (same as background)
-            shap_values_all = explainer.shap_values(pd.DataFrame(features_scaled, columns=feature_order))
+            # Use DataFrame with scaled values and same column names
+            features_scaled_df = pd.DataFrame(features_scaled, columns=feature_order)
+            shap_values_all = explainer.shap_values(features_scaled_df)
             if len(shap_values_all.shape) == 3:
                 shap_values_failure = shap_values_all[0, :, 1]
             else:
@@ -154,12 +157,12 @@ with right_col:
             st.pyplot(fig)
             plt.close()
             
-            # Dot plot (single sample)
+            # Dot plot
             st.subheader("📌 Direction of Feature Contribution")
             fig, ax = plt.subplots(figsize=(8, 4))
             shap.summary_plot(
                 shap_values_failure.reshape(1, -1),
-                pd.DataFrame(features_scaled, columns=feature_order),
+                features_scaled_df,
                 plot_type="dot",
                 show=False
             )
